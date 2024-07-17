@@ -18,6 +18,8 @@
 import torch
 import torch.nn.functional as F
 from torch import nn
+import torch.optim as optim
+import torch.distributions as dist
 
 batch_size = 10
 
@@ -531,3 +533,39 @@ class TextCNN(nn.Module):
 #   @staticmethod
 #   def backward(ctx, grad_output):
 #     return grad_output
+class BayesLinear(nn.Module):
+    def __init__(self, in_features, out_features):
+        super(BayesLinear, self).__init__()
+        self.mu = nn.Parameter(torch.zeros(out_features, in_features))
+        self.rho = nn.Parameter(torch.ones(out_features, in_features))
+        self.epsilon = dist.Normal(0, 1)
+
+    def forward(self, x):
+        sigma = torch.log1p(torch.exp(self.rho))
+        weight = self.mu + sigma * self.epsilon.sample(self.mu.shape)
+        return torch.nn.functional.linear(x, weight)
+
+class BayesConv(nn.Module):
+    def __init__(self, in_channels, out_channels, kernel_size, stride=1, padding=0):
+        super(BayesConv, self).__init__()
+        self.mu = nn.Parameter(torch.zeros(out_channels, in_channels, kernel_size, kernel_size))
+        self.rho = nn.Parameter(torch.ones(out_channels, in_channels, kernel_size, kernel_size))
+        self.epsilon = dist.Normal(0, 1)
+
+    def forward(self, x):
+        sigma = torch.log1p(torch.exp(self.rho))
+        weight = self.mu + sigma * self.epsilon.sample(self.mu.shape)
+        return torch.nn.functional.conv2d(x, weight, stride=self.stride, padding=self.padding)
+
+class SubspaceMetaLearner(nn.Module):
+    def __init__(self, n, m):
+        super(SubspaceMetaLearner, self).__init__()
+        self.O = nn.Parameter(torch.eye(n, m))  # O in R^(n x m)
+    # 前向传播：将 v 映射到高维空间
+    def forward(self, v):
+        return torch.matmul(self.O, v)
+
+# 强制 O 矩阵正交
+def orthogonalize(O):
+    Q, R = torch.qr(O)
+    return Q

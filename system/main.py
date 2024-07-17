@@ -537,3 +537,13 @@ if __name__ == "__main__":
     
     # print(prof.key_averages().table(sort_by="cpu_time_total", row_limit=20))
     # print(f"\nTotal time cost: {round(time.time()-total_start, 2)}s.")
+
+from system.flcore.trainmodel.subspace_meta_learner import train_subspace_meta_learner
+
+# 示例用法
+n, m = 100, 10
+models = [...]  # 个性化模型列表
+train_sets = [...]  # 训练数据集列表
+val_sets = [...]  # 验证数据集列表
+
+meta_learner = train_subspace_meta_learner(models, train_sets, val_sets, n, m)
