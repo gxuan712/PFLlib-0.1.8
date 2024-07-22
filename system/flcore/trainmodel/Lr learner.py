@@ -1,5 +1,7 @@
 import torch
 import torch.optim as optim
+from torch import nn
+
 from system.flcore.trainmodel.models import SubspaceMetaLearner, orthogonalize
 
 def glorot_init(n, m):
