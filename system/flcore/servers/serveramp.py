@@ -15,14 +15,14 @@
 # with this program; if not, write to the Free Software Foundation, Inc.,
 # 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA.
 
-import torch
 import copy
-import time
-import numpy as np
 import math
+import time
+
+import numpy as np
+import torch
 from flcore.clients.clientamp import clientAMP
 from flcore.servers.serverbase import Server
-from threading import Thread
 from utils.dlg import DLG
 
 
