@@ -3,10 +3,10 @@ import torch.optim as optim
 import torch.nn as nn
 from system.flcore.trainmodel.models import SubspaceMetaLearner, orthogonalize
 
-def train_subspace_meta_learner(models, train_sets, val_sets, n, m, lr=0.01, epochs=100):
+def train_subspace_meta_learner(models, train_sets, val_sets, n, m, epochs=100):
     # 初始化子空间元学习模型和优化器
     meta_learner = SubspaceMetaLearner(n, m)
-    optimizer = optim.Adam(meta_learner.parameters(), lr=lr)
+    optimizer = optim.Adam(meta_learner.parameters())
 
     for epoch in range(epochs):
         meta_loss = 0
@@ -19,7 +19,7 @@ def train_subspace_meta_learner(models, train_sets, val_sets, n, m, lr=0.01, epo
 
             # 定义简单的损失函数并计算训练和验证损失
             criterion = nn.MSELoss()
-            optimizer_model = optim.SGD(model.parameters(), lr=lr)
+            optimizer_model = optim.SGD(model.parameters())
 
             # 计算训练损失
             model.train()
