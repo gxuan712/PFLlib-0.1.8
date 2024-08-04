@@ -1,61 +1,59 @@
 import numpy as np
 import torch
 import torch.nn as nn
-from system.flcore.trainmodel.subspace_meta_learner import SubspaceMetaLearner, orthogonalize, \
-    train_subspace_meta_learner
-from system.flcore.servers.serversBayesian import serversBayesian
-
+import torch.optim as optim
 
 # Example model definition
 class ExampleModel(nn.Module):
     def __init__(self, input_dim, output_dim):
         super(ExampleModel, self).__init__()
         self.fc = nn.Linear(input_dim, output_dim)
+        self.softmax = nn.LogSoftmax(dim=1)
 
     def forward(self, x):
-        return self.fc(x)
+        x = self.fc(x)
+        return self.softmax(x)
 
-    def set_weights(self, weights):
-        self.fc.weight = nn.Parameter(weights)
+# Server class definition
+class serversBayesian:
+    def __init__(self, device, dataset, num_classes, global_rounds, local_epochs):
+        self.device = device
+        self.dataset = dataset
+        self.num_classes = num_classes
+        self.global_rounds = global_rounds
+        self.local_epochs = local_epochs
 
+    def train(self, models, train_sets):
+        print("Training process starts...")
+        for model, (train_x, train_y) in zip(models, train_sets):
+            optimizer = optim.SGD(model.parameters(), lr=0.01)
+            loss_function = nn.NLLLoss()
+            for epoch in range(self.local_epochs):
+                model.train()
+                optimizer.zero_grad()
+                outputs = model(train_x)
+                loss = loss_function(outputs, train_y)
+                loss.backward()
+                optimizer.step()
+                print(f'Epoch {epoch+1}, Loss: {loss.item()}')
 
-# Load datasets from .npz files
-train_data = np.load('C:/Users/97481/Desktop/PFLlib-0.1.8/dataset/MNIST/train/0.npz')
-test_data = np.load('C:/Users/97481/Desktop/PFLlib-0.1.8/dataset/MNIST/test/0.npz')
+# Load datasets
+mnist_data = np.load('C:/Users/97481/Desktop/PFLlib-0.1.8/dataset/MNIST/mnist.npz')
 
-print("Train data keys:", train_data.keys())
-print("Test data keys:", test_data.keys())
-
-# Assume the .npz file contains 'x_train' and 'y_train' arrays
-train_features = torch.tensor(train_data['x_train'], dtype=torch.float32)
-train_labels = torch.tensor(train_data['y_train'], dtype=torch.float32)
-test_features = torch.tensor(test_data['x_test'], dtype=torch.float32)
-test_labels = torch.tensor(test_data['y_test'], dtype=torch.float32)
-
-# Example split into multiple datasets (assuming the data is to be split for different clients)
-num_clients = 10
-split_train_features = torch.chunk(train_features, num_clients)
-split_train_labels = torch.chunk(train_labels, num_clients)
-split_test_features = torch.chunk(test_features, num_clients)
-split_test_labels = torch.chunk(test_labels, num_clients)
-
-# Create lists of tuples (features, labels) for train and validation sets
-train_sets = [(split_train_features[i], split_train_labels[i]) for i in range(num_clients)]
-val_sets = [(split_test_features[i], split_test_labels[i]) for i in range(num_clients)]
-
+# Handling data
+train_features = torch.tensor(mnist_data['x_train'].reshape(-1, 28*28), dtype=torch.float32)  # Reshape for fully connected input
+train_labels = torch.tensor(mnist_data['y_train'], dtype=torch.long)
 input_dim = train_features.shape[1]
-output_dim = train_labels.shape[1]
+output_dim = 10
 
-models = [ExampleModel(input_dim, output_dim) for _ in range(num_clients)]
+# Creating a single example model for simplicity
+model = ExampleModel(input_dim, output_dim)
 
-# Define arguments for serversBayesian
-args = {}  # Define your specific arguments here
-times = 1  # Define your specific times here
-n, m = 100, 10
-meta_epochs = 100
+# Simple data split for demonstration
+train_set = (train_features[:1000], train_labels[:1000])
 
-# Initialize serversBayesian
-server = serversBayesian(args, times, n, m, meta_epochs)
+# Server initialization
+server = serversBayesian(device='cpu', dataset='MNIST', num_classes=10, global_rounds=1, local_epochs=5)
 
-# Train the server with the models and datasets
-server.train()
+# Start training with one model and one part of the dataset
+server.train([model], [train_set])
