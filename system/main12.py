@@ -28,7 +28,7 @@ class serversBayesian:
     def train(self, models, train_sets):
         print("Training process starts...")
         for model, (train_x, train_y) in zip(models, train_sets):
-            optimizer = optim.SGD(model.parameters(), lr=0.01)
+            optimizer = optim.SGD(model.parameters())
             loss_function = nn.NLLLoss()
             for epoch in range(self.local_epochs):
                 model.train()
