@@ -1,5 +1,6 @@
 import torch
 import torch.nn as nn
+import torch.optim as optim
 
 
 class SubspaceMetaLearner(nn.Module):
@@ -7,7 +8,8 @@ class SubspaceMetaLearner(nn.Module):
         super(SubspaceMetaLearner, self).__init__()
         self.n = n  # 输入维度
         self.m = m  # 子空间维度
-        self.O = nn.Parameter(torch.randn(n * 128, m))  # 初始化 O 矩阵 (n * hidden_dim, m)
+        total_weights = n * 512 + 512 * 256 + 256 * 10  # 计算所有层的总权重
+        self.O = nn.Parameter(torch.randn(total_weights, m) * 0.01)  # 初始化 O 矩阵
 
     def forward(self, v):
         # v 的形状应为 [m]
@@ -23,47 +25,77 @@ def orthogonalize(matrix):
     return q
 
 
-def train_subspace_meta_learner(models, train_sets, val_sets, n, m, epochs=100, output_dim=10, hidden_dim=128):
+def generate_v_k(device, m):
+    v_k = nn.Parameter(torch.randn(m, device=device) * 0.01)
+    return v_k
+
+
+def train_subspace_meta_learner(models, train_loader, val_loader, n, m, generate_v_k, epochs=500, output_dim=10, learning_rate=0.05):
     meta_learner = SubspaceMetaLearner(n, m)
+    optimizer = optim.AdamW(meta_learner.parameters(), lr=learning_rate)  # 使用 AdamW 优化器
+    scheduler = optim.lr_scheduler.StepLR(optimizer, step_size=50, gamma=0.1)  # 每50个epoch将学习率减少为原来的10%
+
+    best_loss = float('inf')
+    best_state = None
 
     for epoch in range(epochs):
         meta_loss = 0
-        for model, train_set, val_set in zip(models, train_sets, val_sets):
-            train_images, train_labels = train_set
-            val_images, val_labels = val_set
+        for model in models:
+            model.train()
+            for batch_idx, (data, target) in enumerate(train_loader):
+                # 为元学习者执行训练步骤
+                optimizer.zero_grad()
+                v_k = generate_v_k(m)  # 使用生成函数生成潜在向量 v_k
+                w_k = meta_learner(v_k)
+                if w_k.numel() != meta_learner.O.shape[0]:
+                    raise ValueError(f"生成的权重矩阵大小不匹配，w_k 的大小为 {w_k.numel()}")
 
-            # 为元学习者执行训练步骤
-            v_k = torch.randn(m)  # 示例潜在向量 v_k
-            w_k = meta_learner(v_k)
-            if w_k.numel() != hidden_dim * n:
-                raise ValueError(f"生成的权重矩阵 w_k 的大小为 {w_k.numel()}，但预期大小为 {hidden_dim * n}")
-            model_weight = w_k.view(hidden_dim, n)  # 重塑以匹配模型的权重形状
-            model.fc1.weight.data = model_weight
+                # 更新模型参数
+                offset = 0
+                model.fc1.weight = nn.Parameter(w_k[offset:offset + 512*n].view(512, n))
+                offset += 512 * n
+                model.fc2.weight = nn.Parameter(w_k[offset:offset + 256*512].view(256, 512))
+                offset += 256 * 512
+                model.fc3.weight = nn.Parameter(w_k[offset:offset + 10*256].view(10, 256))
 
-            optimizer = torch.optim.SGD(model.parameters(), lr=0.01)  # 使用 SGD 优化器
-            optimizer.zero_grad()
-            loss = nn.CrossEntropyLoss()(model(train_images), train_labels)
-            loss.backward()
-            optimizer.step()
+                # 前向传播
+                outputs = model(data)
+                loss = nn.CrossEntropyLoss()(outputs, target)
+                loss.backward()
 
-            meta_loss += loss.item()
+                # 梯度裁剪
+                torch.nn.utils.clip_grad_norm_(meta_learner.parameters(), max_norm=1.0)
 
-        # 正交化 O
-        with torch.no_grad():
-            meta_learner.O.data = orthogonalize(meta_learner.O.data)
+                optimizer.step()
 
+                meta_loss += loss.item()
+
+        scheduler.step()  # 更新学习率
+
+        # 打印日志
         print(f"Epoch {epoch + 1}/{epochs}, Meta Loss: {meta_loss / len(models)}")
 
-        # 打印每个模型的验证损失和准确率
-        for i, (model, val_set) in enumerate(zip(models, val_sets)):
-            val_images, val_labels = val_set
+        # 验证模型
+        for i, model in enumerate(models):
             model.eval()
+            val_loss = 0
+            correct = 0
             with torch.no_grad():
-                outputs = model(val_images)
-                val_loss = nn.CrossEntropyLoss()(outputs, val_labels)
-                _, predicted = torch.max(outputs, 1)
-                correct = (predicted == val_labels).sum().item()
-                total = val_labels.size(0)
-                accuracy = correct / total
-                print(f"模型 {i + 1}: 验证损失: {val_loss.item()}, 验证准确率: {accuracy * 100:.2f}%")
+                for data, target in val_loader:
+                    output = model(data)
+                    val_loss += nn.CrossEntropyLoss()(output, target).item()
+                    pred = output.argmax(dim=1, keepdim=True)
+                    correct += pred.eq(target.view_as(pred)).sum().item()
 
+            val_loss /= len(val_loader.dataset)
+            accuracy = 100. * correct / len(val_loader.dataset)
+            print(f'模型 {i + 1}: 验证损失: {val_loss:.8f}, 验证准确率: {accuracy:.2f}%')
+
+            # 保存最佳模型
+            if val_loss < best_loss:
+                best_loss = val_loss
+                best_state = meta_learner.state_dict()
+
+    # 恢复最佳模型状态
+    if best_state is not None:
+        meta_learner.load_state_dict(best_state)

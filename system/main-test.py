@@ -39,7 +39,8 @@ def main():
     # 超参数
     n = 784  # 输入维度 (28x28 图像展平)
     output_dim = 10  # 类别数量 (数字 0-9)
-    hidden_dim = 128  # 隐藏层维度
+    hidden_dim1 = 512  # 第一隐藏层维度
+    hidden_dim2 = 256  # 第二隐藏层维度
 
     # 加载数据
     test_images = read_idx('C:/Users/97481/Desktop/PFLlib-0.1.8/dataset/MNIST/test/t10k-images-idx3-ubyte.gz')
@@ -51,20 +52,29 @@ def main():
 
     # 初始化模型
     class SimpleNN(nn.Module):
-        def __init__(self, input_dim, hidden_dim, output_dim):
+        def __init__(self, input_dim, hidden_dim1, hidden_dim2, output_dim):
             super(SimpleNN, self).__init__()
-            self.fc1 = nn.Linear(input_dim, hidden_dim)
-            self.relu = nn.ReLU()
-            self.fc2 = nn.Linear(hidden_dim, output_dim)
-            self.output_dim = output_dim
+            self.input_dim = input_dim
+            self.fc1 = nn.Linear(input_dim, hidden_dim1)
+            self.bn1 = nn.BatchNorm1d(hidden_dim1)
+            self.relu1 = nn.ReLU()
+            self.fc2 = nn.Linear(hidden_dim1, hidden_dim2)
+            self.bn2 = nn.BatchNorm1d(hidden_dim2)
+            self.relu2 = nn.ReLU()
+            self.fc3 = nn.Linear(hidden_dim2, output_dim)
 
         def forward(self, x):
-            out = self.fc1(x)
-            out = self.relu(out)
-            out = self.fc2(out)
-            return out
+            x = x.view(-1, self.input_dim)  # 展平图像
+            x = self.fc1(x)
+            x = self.bn1(x)
+            x = self.relu1(x)
+            x = self.fc2(x)
+            x = self.bn2(x)
+            x = self.relu2(x)
+            x = self.fc3(x)
+            return x
 
-    models = [SimpleNN(n, hidden_dim, output_dim) for _ in range(5)]
+    models = [SimpleNN(n, hidden_dim1, hidden_dim2, output_dim) for _ in range(5)]
 
     # 加载训练后的模型
     for i, model in enumerate(models):
