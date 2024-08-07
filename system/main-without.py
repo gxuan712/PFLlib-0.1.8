@@ -4,89 +4,126 @@ import torch.nn as nn
 import torch.optim as optim
 import gzip
 import os
-from torchvision import datasets, transforms
-from torch.utils.data import DataLoader
+from torch.utils.data import DataLoader, TensorDataset
+from torchvision import transforms
 
-
-# Helper function to read IDX files
+# 读取 idx 文件的函数
 def read_idx(file_path):
     if not os.path.exists(file_path):
-        raise FileNotFoundError(f"No such file or directory: '{file_path}'")
+        raise FileNotFoundError(f"没有这样的文件或目录: '{file_path}'")
     with gzip.open(file_path, 'rb') as f:
         magic_number = int.from_bytes(f.read(4), byteorder='big')
         num_items = int.from_bytes(f.read(4), byteorder='big')
-        if magic_number == 2049:  # Label file (magic number 2049)
+        if magic_number == 2049:  # 标签文件
             data = np.frombuffer(f.read(), dtype=np.uint8)
-        elif magic_number == 2051:  # Image file (magic number 2051)
+        elif magic_number == 2051:  # 图像文件
             num_rows = int.from_bytes(f.read(4), byteorder='big')
             num_cols = int.from_bytes(f.read(4), byteorder='big')
             data = np.frombuffer(f.read(), dtype=np.uint8).reshape(num_items, num_rows, num_cols)
         else:
-            raise ValueError(f"Invalid magic number {magic_number} in file: {file_path}")
+            raise ValueError(f"文件中的 magic number {magic_number} 无效: {file_path}")
     return data
 
+# 数据增强变换
+transform = transforms.Compose([
+    transforms.ToPILImage(),
+    transforms.RandomRotation(10),
+    transforms.RandomHorizontalFlip(),
+    transforms.ToTensor()
+])
 
-# Load datasets
-train_images_path = 'C:/Users/97481/Desktop/PFLlib-0.1.8/dataset/MNIST/train/train-images-idx3-ubyte.gz'
-train_labels_path = 'C:/Users/97481/Desktop/PFLlib-0.1.8/dataset/MNIST/train/train-labels-idx1-ubyte.gz'
-test_images_path = 'C:/Users/97481/Desktop/PFLlib-0.1.8/dataset/MNIST/test/t10k-images-idx3-ubyte.gz'
-test_labels_path = 'C:/Users/97481/Desktop/PFLlib-0.1.8/dataset/MNIST/test/t10k-labels-idx1-ubyte.gz'
+# 加载数据
+train_images = read_idx('C:/Users/97481/Desktop/PFLlib-0.1.8/dataset/MNIST/rawdata/MNIST/raw/train-images-idx3-ubyte.gz')
+train_labels = read_idx('C:/Users/97481/Desktop/PFLlib-0.1.8/dataset/MNIST/rawdata/MNIST/raw/train-labels-idx1-ubyte.gz')
+val_images = read_idx('C:/Users/97481/Desktop/PFLlib-0.1.8/dataset/MNIST/rawdata/MNIST/raw/t10k-images-idx3-ubyte.gz')
+val_labels = read_idx('C:/Users/97481/Desktop/PFLlib-0.1.8/dataset/MNIST/rawdata/MNIST/raw/t10k-labels-idx1-ubyte.gz')
 
-train_images = read_idx(train_images_path)
-train_labels = read_idx(train_labels_path)
-test_images = read_idx(test_images_path)
-test_labels = read_idx(test_labels_path)
-
-# Preprocessing
-train_images = torch.tensor(train_images.reshape(-1, 28 * 28), dtype=torch.float32) / 255.0
+# 将数据转换为 PyTorch张量，并进行标准化处理
+train_images = torch.tensor(train_images, dtype=torch.float32).view(-1, 1, 28, 28) / 255.0
 train_labels = torch.tensor(train_labels, dtype=torch.long)
-test_images = torch.tensor(test_images.reshape(-1, 28 * 28), dtype=torch.float32) / 255.0
-test_labels = torch.tensor(test_labels, dtype=torch.long)
+val_images = torch.tensor(val_images, dtype=torch.float32).view(-1, 1, 28, 28) / 255.0
+val_labels = torch.tensor(val_labels, dtype=torch.long)
 
+# 创建数据集并应用数据增强
+train_dataset = TensorDataset(train_images, train_labels)
+val_dataset = TensorDataset(val_images, val_labels)
 
-# Simple Neural Network Model
+class AugmentedDataset(torch.utils.data.Dataset):
+    def __init__(self, dataset, transform=None):
+        self.dataset = dataset
+        self.transform = transform
+
+    def __len__(self):
+        return len(self.dataset)
+
+    def __getitem__(self, idx):
+        image, label = self.dataset[idx]
+        image = image.squeeze(0)  # 移除单通道维度
+        if self.transform:
+            image = self.transform(image.numpy())
+        return image, label
+
+train_loader = DataLoader(AugmentedDataset(train_dataset, transform=transform), batch_size=128, shuffle=True, num_workers=4)
+val_loader = DataLoader(val_dataset, batch_size=128, shuffle=False, num_workers=4)
+
+# 初始化模型
 class SimpleNN(nn.Module):
     def __init__(self, input_dim, output_dim):
         super(SimpleNN, self).__init__()
-        self.fc1 = nn.Linear(input_dim, 128)
-        self.fc2 = nn.Linear(128, output_dim)
+        self.fc1 = nn.Linear(input_dim, 512)
+        self.fc2 = nn.Linear(512, 256)
+        self.fc3 = nn.Linear(256, output_dim)
 
     def forward(self, x):
+        x = x.view(-1, self.fc1.in_features)  # 展平图像
         x = torch.relu(self.fc1(x))
-        x = self.fc2(x)
+        x = torch.relu(self.fc2(x))
+        x = self.fc3(x)
         return x
 
+# 创建单个模型实例
+model = SimpleNN(784, 10)
+optimizer = optim.AdamW(model.parameters(), lr=0.05)
+scheduler = optim.lr_scheduler.StepLR(optimizer, step_size=50, gamma=0.1)
+criterion = nn.CrossEntropyLoss()
 
-# Initialize model, loss function, and optimizer
-input_dim = 28 * 28
-output_dim = 10
-model = SimpleNN(input_dim, output_dim)
-loss_function = nn.CrossEntropyLoss()
-optimizer = optim.SGD(model.parameters(), lr=0.01)
-
-
-# Training the model
-def train(model, train_images, train_labels, epochs):
+# 训练和验证
+def train_and_validate(model, train_loader, val_loader, epochs):
     for epoch in range(epochs):
         model.train()
-        optimizer.zero_grad()
-        outputs = model(train_images)
-        loss = loss_function(outputs, train_labels)
-        loss.backward()
-        optimizer.step()
-        print(f'Epoch {epoch + 1}, Loss: {loss.item()}')
+        train_loss = 0
+        for batch_idx, (data, target) in enumerate(train_loader):
+            optimizer.zero_grad()
+            outputs = model(data)
+            loss = criterion(outputs, target)
+            loss.backward()
+            optimizer.step()
+            train_loss += loss.item()
 
+        scheduler.step()  # 更新学习率
 
-# Testing the model
-def test(model, test_images, test_labels):
-    model.eval()
-    with torch.no_grad():
-        outputs = model(test_images)
-        _, predicted = torch.max(outputs, 1)
-        accuracy = (predicted == test_labels).sum().item() / len(test_labels)
-        print(f'Test Accuracy: {accuracy * 100:.2f}%')
+        # 打印训练损失
+        print(f"Epoch {epoch + 1}/{epochs}, Train Loss: {train_loss / len(train_loader)}")
 
+        # 验证模型
+        model.eval()
+        val_loss = 0
+        correct = 0
+        with torch.no_grad():
+            for data, target in val_loader:
+                outputs = model(data)
+                val_loss += criterion(outputs, target).item()
+                pred = outputs.argmax(dim=1, keepdim=True)
+                correct += pred.eq(target.view_as(pred)).sum().item()
 
-# Train and test
-train(model, train_images, train_labels, epochs=5)
-test(model, test_images, test_labels)
+        val_loss /= len(val_loader.dataset)
+        accuracy = 100. * correct / len(val_loader.dataset)
+        print(f"Validation Loss: {val_loss:.4f}, Validation Accuracy: {accuracy:.2f}%")
+
+# 主要执行函数
+if __name__ == '__main__':
+    train_and_validate(model, train_loader, val_loader, epochs=50)
+
+    # 保存模型
+    torch.save(model.state_dict(), 'simple_nn_model.pth')
+    print('Model saved to simple_nn_model.pth')
