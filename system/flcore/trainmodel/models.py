@@ -533,28 +533,4 @@ class TextCNN(nn.Module):
 #   @staticmethod
 #   def backward(ctx, grad_output):
 #     return grad_output
-class BayesLinear(nn.Module):
-    def __init__(self, in_features, out_features):
-        super(BayesLinear, self).__init__()
-        self.mu = nn.Parameter(torch.zeros(out_features, in_features))
-        self.rho = nn.Parameter(torch.ones(out_features, in_features))
-        self.epsilon = dist.Normal(0, 1)
 
-    def forward(self, x):
-        sigma = torch.log1p(torch.exp(self.rho))
-        weight = self.mu + sigma * self.epsilon.sample(self.mu.shape)
-        return torch.nn.functional.linear(x, weight)
-
-class BayesConv(nn.Module):
-    def __init__(self, in_channels, out_channels, kernel_size, stride=1, padding=0):
-        super(BayesConv, self).__init__()
-        self.mu = nn.Parameter(torch.zeros(out_channels, in_channels, kernel_size, kernel_size))
-        self.rho = nn.Parameter(torch.ones(out_channels, in_channels, kernel_size, kernel_size))
-        self.epsilon = dist.Normal(0, 1)
-        self.stride = stride
-        self.padding = padding
-
-    def forward(self, x):
-        sigma = torch.log1p(torch.exp(self.rho))
-        weight = self.mu + sigma * self.epsilon.sample(self.mu.shape)
-        return torch.nn.functional.conv2d(x, weight, stride=self.stride, padding=self.padding)
