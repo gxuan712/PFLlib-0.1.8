@@ -64,9 +64,9 @@ class SimpleNN(nn.Module):
         return x
 
 # 训练本地模型
-def train_local_model(model, train_loader, meta_learner, device, lr=0.01):
+def train_local_model(model, train_loader, meta_learner, device, lr=0.01, weight_decay=1e-4):
     model.train()
-    optimizer = optim.SGD(model.parameters(), lr=lr, momentum=0.9)
+    optimizer = optim.SGD(model.parameters(), lr=lr, momentum=0.9, weight_decay=weight_decay)
     for data, target in train_loader:
         data, target = data.to(device), target.to(device)
         optimizer.zero_grad()
@@ -132,6 +132,7 @@ def main():
     federated_rounds = 5  # 联邦学习轮数
     batch_size = 128  # 批量大小
     lr = 0.01  # 学习率
+    weight_decay = 1e-4  # 权重衰减
 
     # 加载数据
     train_images = read_idx('C:/Users/97481/Desktop/PFLlib-0.1.8/dataset/MNIST/train/train-images-idx3-ubyte.gz')
