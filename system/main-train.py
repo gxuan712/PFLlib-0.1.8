@@ -64,25 +64,26 @@ class SimpleNN(nn.Module):
         return x
 
 # 训练本地模型
-def train_local_model(model, train_loader, meta_learner, device, lr=0.01, weight_decay=1e-4):
+def train_local_model(model, train_loader, meta_learner, device, epochs, lr=0.01, weight_decay=1e-4):
     model.train()
     optimizer = optim.SGD(model.parameters(), lr=lr, momentum=0.9, weight_decay=weight_decay)
-    for data, target in train_loader:
-        data, target = data.to(device), target.to(device)
-        optimizer.zero_grad()
+    for epoch in range(epochs):
+        for data, target in train_loader:
+            data, target = data.to(device), target.to(device)
+            optimizer.zero_grad()
 
-        # 生成随机低维向量 v
-        v = torch.randn(meta_learner.m).to(device)
+            # 生成随机低维向量 v
+            v = torch.randn(meta_learner.m).to(device)
 
-        # 通过元学习器获取权重
-        w_k1, w_k2 = meta_learner(v)
-        model.fc1.weight = nn.Parameter(w_k1.view(128, 28*28))
-        model.fc2.weight = nn.Parameter(w_k2.view(10, 128))
+            # 通过元学习器获取权重
+            w_k1, w_k2 = meta_learner(v)
+            model.fc1.weight = nn.Parameter(w_k1.view(128, 28*28))
+            model.fc2.weight = nn.Parameter(w_k2.view(10, 128))
 
-        output = model(data)
-        loss = nn.CrossEntropyLoss()(output, target)
-        loss.backward()
-        optimizer.step()
+            output = model(data)
+            loss = nn.CrossEntropyLoss()(output, target)
+            loss.backward()
+            optimizer.step()
 
 # 贝叶斯更新
 def bayesian_update(global_model, local_models, sigma2):
@@ -117,7 +118,7 @@ def federated_training(global_model, train_loaders, val_loader, meta_learner, ep
         local_models = [SimpleNN(28*28, 128, 10).to(device) for _ in range(len(train_loaders))]
         for i, train_loader in enumerate(train_loaders):
             local_models[i].load_state_dict(global_model.state_dict())
-            train_local_model(local_models[i], train_loader, meta_learner, device, lr=lr)
+            train_local_model(local_models[i], train_loader, meta_learner, device, epochs, lr=lr)
         bayesian_update(global_model, local_models, sigma2)
         val_loss, accuracy = test(global_model, val_loader, device)
         print(f"Round {round+1}/{rounds} - Validation Loss: {val_loss:.4f}, Accuracy: {accuracy:.2f}%")
