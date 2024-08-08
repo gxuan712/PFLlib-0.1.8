@@ -64,7 +64,7 @@ class SimpleNN(nn.Module):
         return x
 
 # 训练本地模型
-def train_local_model(model, train_loader, meta_learner, device, epochs, lr=0.01, weight_decay=1e-4):
+def train_local_model(model, train_loader, meta_learner, device, epochs, lr=0.1, weight_decay=1e-4):
     model.train()
     optimizer = optim.SGD(model.parameters(), lr=lr, momentum=0.9, weight_decay=weight_decay)
     for epoch in range(epochs):
