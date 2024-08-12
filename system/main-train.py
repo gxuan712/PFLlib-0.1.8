@@ -1,173 +1,114 @@
-import numpy as np
 import torch
 import torch.nn as nn
 import torch.optim as optim
 import gzip
-import os
-from torch.utils.data import DataLoader, TensorDataset, random_split
+import numpy as np
 
-# Function to read IDX files in MNIST dataset format
-def read_idx(file_path):
-    if not os.path.exists(file_path):
-        raise FileNotFoundError(f"No such file or directory: '{file_path}'")
-    with gzip.open(file_path, 'rb') as f:
-        magic_number = int.from_bytes(f.read(4), byteorder='big')
-        num_items = int.from_bytes(f.read(4), byteorder='big')
-        if magic_number == 2049:  # Label file
+# 定义函数以读取IDX文件
+def read_idx(filename):
+    with gzip.open(filename, 'rb') as f:
+        magic_number = int.from_bytes(f.read(4), 'big')
+        if magic_number == 2051:  # 图像
+            num_images = int.from_bytes(f.read(4), 'big')
+            num_rows = int.from_bytes(f.read(4), 'big')
+            num_cols = int.from_bytes(f.read(4), 'big')
+            data = np.frombuffer(f.read(), dtype=np.uint8).reshape(num_images, num_rows, num_cols)
+        elif magic_number == 2049:  # 标签
+            num_labels = int.from_bytes(f.read(4), 'big')
             data = np.frombuffer(f.read(), dtype=np.uint8)
-        elif magic_number == 2051:  # Image file
-            num_rows = int.from_bytes(f.read(4), byteorder='big')
-            num_cols = int.from_bytes(f.read(4), byteorder='big')
-            data = np.frombuffer(f.read(), dtype=np.uint8).reshape(num_items, num_rows, num_cols)
         else:
-            raise ValueError(f"Invalid magic number {magic_number} in file: {file_path}")
+            raise ValueError(f'Invalid magic number {magic_number} in file: {filename}')
     return data
 
-# Subspace Meta-Learner Module
-# Subspace Meta-Learner Module
-# Subspace Meta-Learner Module
-class SubspaceMetaLearner(nn.Module):
-    def __init__(self, input_dim, m, output_dim):
-        super(SubspaceMetaLearner, self).__init__()
-        self.input_dim = input_dim
-        self.output_dim = output_dim
-        self.m = m  # 子空间维度
-        # 调整 O 的形状为 (input_dim * output_dim, m)
-        self.O = nn.Parameter(torch.randn(input_dim * output_dim, m) * 0.01)
+# 加载数据集
+train_images = read_idx('C:/Users/97481/Desktop/PFLlib-0.1.8/dataset/MNIST/train/train-images-idx3-ubyte.gz')
+train_labels = read_idx('C:/Users/97481/Desktop/PFLlib-0.1.8/dataset/MNIST/train/train-labels-idx1-ubyte.gz')
+val_images = read_idx('C:/Users/97481/Desktop/PFLlib-0.1.8/dataset/MNIST/test/t10k-images-idx3-ubyte.gz')
+val_labels = read_idx('C:/Users/97481/Desktop/PFLlib-0.1.8/dataset/MNIST/test/t10k-labels-idx1-ubyte.gz')
 
-    def forward(self, v):
-        # 确保 v 的形状为 (m,)
-        v = v.view(self.m, 1)  # 将 v 调整为 (m, 1)
-        weight = torch.matmul(self.O, v).view(self.output_dim, self.input_dim)
-        return weight
+# 归一化图像数据并转换为张量
+train_images = torch.tensor(train_images, dtype=torch.float32) / 255.0
+train_labels = torch.tensor(train_labels, dtype=torch.long)
+val_images = torch.tensor(val_images, dtype=torch.float32) / 255.0
+val_labels = torch.tensor(val_labels, dtype=torch.long)
 
-    def update_O(self, local_O):
-        with torch.no_grad():
-            self.O.data += local_O.data  # 聚合各个客户端的 O
-        # 正交化 O，以保持尺寸不变
-        self.O.data = orthogonalize(self.O.data)
+# 将图像展平
+train_images = train_images.view(-1, 28*28)
+val_images = val_images.view(-1, 28*28)
 
+# 将数据划分为5个客户端的数据集
+num_clients = 5
+client_train_images = torch.chunk(train_images, num_clients)
+client_train_labels = torch.chunk(train_labels, num_clients)
 
-# Simple Neural Network Model
-class SimpleNN(nn.Module):
-    def __init__(self, input_dim, output_dim):
-        super(SimpleNN, self).__init__()
-        self.fc1 = nn.Linear(input_dim, output_dim)
+# 超参数
+n = 784  # MNIST图像展平后的大小 (28*28)
+m = 50   # 低维空间的大小
 
-    def forward(self, x):
-        x = x.view(-1, self.fc1.in_features)
-        x = self.fc1(x)
-        return x
+# 初始化全局操作矩阵O
+O_global = nn.Parameter(torch.randn(n, m))
 
-# Train local model function
-# Train local model function
-# Train local model function
-def train_local_model(model, train_loader, meta_learner, device, epochs):
-    model.train()
-    optimizer = optim.SGD(model.parameters(), lr=0.1, momentum=0.9)
-    for epoch in range(epochs):
-        for data, target in train_loader:
-            data, target = data.to(device), target.to(device)
-            optimizer.zero_grad()
-
-            # 生成与 O 形状匹配的随机向量 v
-            v = torch.randn(meta_learner.m, device=device)  # 确保 v 的形状为 (m,)
-            new_weights = meta_learner(v)
-            model.fc1.weight = nn.Parameter(new_weights)
-
-            output = model(data)
-            loss = nn.CrossEntropyLoss()(output, target)
-            loss.backward()
-            optimizer.step()
-
-    # 返回本地更新后的 O
-    return meta_learner.O
-
-# Server-side aggregation and orthogonalization function
-def orthogonalize(matrix):
-    q, _ = torch.linalg.qr(matrix)
-    return q
-
-def federated_training(global_model, train_loaders, meta_learner, epochs, rounds, device, val_loader):
-    for round in range(rounds):
-        for i, train_loader in enumerate(train_loaders):
-            # 本地客户端训练并返回更新后的 O
-            local_O = train_local_model(global_model, train_loader, meta_learner, device, epochs)
-
-            # 服务器端聚合 O，并通过正交化生成新的 O
-            meta_learner.update_O(local_O)
-
-        # 执行每一轮的验证
-        val_loss, accuracy = test(global_model, val_loader, device)
-        print(f"Round {round + 1}/{rounds} - Validation Loss: {val_loss:.4f}, Accuracy: {accuracy:.2f}%")
-
-# Model evaluation function
-def test(model, val_loader, device):
-    model.eval()
-    val_loss = 0
-    correct = 0
+# 正交化O (O^T O = I)
+def orthogonalize(O):
     with torch.no_grad():
-        for data, target in val_loader:
-            data, target = data.to(device), target.to(device)
-            output = model(data)
-            val_loss += nn.CrossEntropyLoss()(output, target).item()
-            pred = output.argmax(dim=1, keepdim=True)
-            correct += pred.eq(target.view_as(pred)).sum().item()
+        u, _, v = torch.svd(O, some=True)
+        return torch.matmul(u, v.T)
 
-    val_loss /= len(val_loader.dataset)
-    accuracy = 100. * correct / len(val_loader.dataset)
-    return val_loss, accuracy
+# 服务器端聚合从客户端返回的O，并更新全局O
+def aggregate_O(O_list):
+    O_new = torch.mean(torch.stack(O_list), dim=0)
+    # 正交化更新后的O
+    O_orthogonal = orthogonalize(O_new)
+    return O_orthogonal
 
-# Main function to initiate the process
-def main():
-    # Hyperparameters
-    n = 28 * 28  # input dimension (flattened 28x28 image)
-    output_dim = 10  # number of classes (digits 0-9)
-    epochs = 5  # local training epochs
-    federated_rounds = 100  # number of federated rounds
-    batch_size = 128  # batch size
-    lr = 0.01  # learning rate
+# 模拟服务器与客户端之间的通信
+def server_side(O, num_clients=5):
+    O_list = []
+    for client_id in range(num_clients):
+        # 模拟客户端的训练，并返回更新后的O
+        O_k = client_side(O, client_train_images[client_id], client_train_labels[client_id])
+        O_list.append(O_k)
 
-    # Load data
-    train_images = read_idx('C:/Users/97481/Desktop/PFLlib-0.1.8/dataset/MNIST/rawdata/MNIST/raw/train-images-idx3-ubyte.gz')
-    train_labels = read_idx('C:/Users/97481/Desktop/PFLlib-0.1.8/dataset/MNIST/rawdata/MNIST/raw/train-labels-idx1-ubyte.gz')
-    val_images = read_idx('C:/Users/97481/Desktop/PFLlib-0.1.8/dataset/MNIST/rawdata/MNIST/raw/t10k-images-idx3-ubyte.gz')
-    val_labels = read_idx('C:/Users/97481/Desktop/PFLlib-0.1.8/dataset/MNIST/rawdata/MNIST/raw/t10k-labels-idx1-ubyte.gz')
+    # 聚合客户端的O并更新全局O
+    O_global = aggregate_O(O_list)
+    return O_global
 
-    # Data preprocessing
-    train_images = torch.tensor(train_images, dtype=torch.float32).unsqueeze(1) / 255.0
-    train_labels = torch.tensor(train_labels, dtype=torch.long)
-    val_images = torch.tensor(val_images, dtype=torch.float32).unsqueeze(1) / 255.0
-    val_labels = torch.tensor(val_labels, dtype=torch.long)
+# 客户端接收O并进行优化
+def client_side(O, client_images, client_labels):
+    # 初始化客户端的低维个性化权重v_k
+    v_k = nn.Parameter(torch.randn(m, 1))
 
-    # Create datasets and dataloaders
-    train_dataset = TensorDataset(train_images, train_labels)
-    val_dataset = TensorDataset(val_images, val_labels)
+    # 定义v_k和O的优化器
+    optimizer = optim.Adam([O, v_k], lr=0.01)
 
-    # Split data into clients
-    num_clients = 5
-    client_datasets = random_split(train_dataset, [len(train_dataset) // num_clients] * num_clients)
-    train_loaders = [DataLoader(client_dataset, batch_size=batch_size, shuffle=True) for client_dataset in client_datasets]
-    val_loader = DataLoader(val_dataset, batch_size=batch_size, shuffle=False)
+    num_local_epochs = 5
+    for epoch in range(num_local_epochs):
+        optimizer.zero_grad()
 
-    # Device configuration
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        # 计算预测值 O * v_k
+        Ov_k = torch.matmul(O, v_k)  # Ov_k 的维度是 (n, 1)
 
-    # Initialize the global model and meta learner
-    global_model = SimpleNN(n, output_dim).to(device)
-    meta_learner = SubspaceMetaLearner(n, 20, output_dim).to(device)
+        # 计算训练集上的损失函数
+        loss = 0
+        for i in range(len(client_images)):
+            d = client_images[i].view(-1, 1)  # 重塑数据点 d (784, 1)
+            prediction = torch.matmul(O.T, d)  # prediction 的维度是 (m, 1)
+            loss += torch.mean((prediction - v_k) ** 2)  # 计算损失
 
-    # Perform federated learning
-    federated_training(global_model, train_loaders, meta_learner, epochs, federated_rounds, device, val_loader)
+        # 优化 v_k 和 O
+        loss.backward()
+        optimizer.step()
 
-    # Validate the global model after final round
-    val_loss, accuracy = test(global_model, val_loader, device)
-    print(f'Final Validation Loss: {val_loss:.4f}, Final Validation Accuracy: {accuracy:.2f}%')
+    return O.detach()  # 返回优化后的O给服务器
 
-    # Save the trained model
-    model_path = 'model.pth'
-    torch.save(global_model.state_dict(), model_path)
-    print(f'Model saved to {model_path}')
+# 初始化O的正交化
+O_global = orthogonalize(O_global)
 
-if __name__ == '__main__':
-    main()
+# 联邦学习的轮次和客户端数量
+num_rounds = 500  # 联邦学习的轮次
+
+for round in range(num_rounds):
+    print(f"Round {round + 1}/{num_rounds}")
+    O_global = server_side(O_global)
+
+print("Final O after training:", O_global)
