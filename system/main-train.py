@@ -4,6 +4,7 @@ import torch.optim as optim
 import gzip
 import numpy as np
 
+
 # 定义函数以读取IDX文件
 def read_idx(filename):
     with gzip.open(filename, 'rb') as f:
@@ -20,6 +21,7 @@ def read_idx(filename):
             raise ValueError(f'Invalid magic number {magic_number} in file: {filename}')
     return data
 
+
 # 加载数据集
 train_images = read_idx('C:/Users/97481/Desktop/PFLlib-0.1.8/dataset/MNIST/train/train-images-idx3-ubyte.gz')
 train_labels = read_idx('C:/Users/97481/Desktop/PFLlib-0.1.8/dataset/MNIST/train/train-labels-idx1-ubyte.gz')
@@ -33,8 +35,8 @@ val_images = torch.tensor(val_images, dtype=torch.float32) / 255.0
 val_labels = torch.tensor(val_labels, dtype=torch.long)
 
 # 将图像展平
-train_images = train_images.view(-1, 28*28)
-val_images = val_images.view(-1, 28*28)
+train_images = train_images.view(-1, 28 * 28)
+val_images = val_images.view(-1, 28 * 28)
 
 # 将数据划分为5个客户端的数据集
 num_clients = 5
@@ -43,16 +45,18 @@ client_train_labels = torch.chunk(train_labels, num_clients)
 
 # 超参数
 n = 784  # MNIST图像展平后的大小 (28*28)
-m = 50   # 低维空间的大小
+m = 50  # 低维空间的大小
 
 # 初始化全局操作矩阵O
 O_global = nn.Parameter(torch.randn(n, m))
+
 
 # 正交化O (O^T O = I)
 def orthogonalize(O):
     with torch.no_grad():
         u, _, v = torch.svd(O, some=True)
         return torch.matmul(u, v.T)
+
 
 # 服务器端聚合从客户端返回的O，并更新全局O
 def aggregate_O(O_list):
@@ -61,19 +65,26 @@ def aggregate_O(O_list):
     O_orthogonal = orthogonalize(O_new)
     return O_orthogonal
 
+
 # 模拟服务器与客户端之间的通信
 def server_side(O, num_clients=5):
     O_list = []
+    total_loss = 0
     for client_id in range(num_clients):
-        # 模拟客户端的训练，并返回更新后的O
-        O_k = client_side(O, client_train_images[client_id], client_train_labels[client_id])
+        # 模拟客户端的训练，并返回更新后的O和loss
+        O_k, client_loss = client_side(O, client_train_images[client_id], client_train_labels[client_id])
         O_list.append(O_k)
+        total_loss += client_loss
 
     # 聚合客户端的O并更新全局O
     O_global = aggregate_O(O_list)
-    return O_global
 
-# 客户端接收O并进行优化
+    # 计算平均loss
+    avg_loss = total_loss / num_clients
+    return O_global, avg_loss
+
+
+# 客户端接收O并进行优化，同时返回loss
 def client_side(O, client_images, client_labels):
     # 初始化客户端的低维个性化权重v_k
     v_k = nn.Parameter(torch.randn(m, 1))
@@ -99,7 +110,10 @@ def client_side(O, client_images, client_labels):
         loss.backward()
         optimizer.step()
 
-    return O.detach()  # 返回优化后的O给服务器
+    # 返回优化后的O和本地平均loss
+    avg_loss = loss.item() / len(client_images)
+    return O.detach(), avg_loss
+
 
 # 初始化O的正交化
 O_global = orthogonalize(O_global)
@@ -109,6 +123,28 @@ num_rounds = 500  # 联邦学习的轮次
 
 for round in range(num_rounds):
     print(f"Round {round + 1}/{num_rounds}")
-    O_global = server_side(O_global)
+    O_global, avg_loss = server_side(O_global)
+    print(f"Average Loss after Round {round + 1}: {avg_loss:.4f}")
 
+torch.save(O_global.state_dict(), 'O_global.pth')
+print("Model saved as 'O_global.pth'")
+
+# 重新加载模型，用于测试
+O_global_loaded = nn.Parameter(torch.randn(n, m))  # 使用相同的初始化
+O_global_loaded.load_state_dict(torch.load('O_global.pth'))
 print("Final O after training:", O_global)
+
+def test_model(O, test_images):
+    test_loss = 0
+    with torch.no_grad():  # 测试时不需要梯度计算
+        for i in range(len(test_images)):
+            d = test_images[i].view(-1, 1)  # 重塑数据点 d (784, 1)
+            prediction = torch.matmul(O.T, d)  # prediction 的维度是 (m, 1)
+            test_loss += torch.mean(prediction ** 2)  # 计算损失
+
+    avg_test_loss = test_loss.item() / len(test_images)
+    return avg_test_loss
+
+# 计算并打印测试集上的损失
+test_loss = test_model(O_global, val_images)
+print(f"Test Loss after training: {test_loss:.4f}")
