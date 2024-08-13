@@ -126,13 +126,11 @@ for round in range(num_rounds):
     O_global, avg_loss = server_side(O_global)
     print(f"Average Loss after Round {round + 1}: {avg_loss:.4f}")
 
-torch.save(O_global.state_dict(), 'O_global.pth')
+torch.save(O_global, 'O_global.pth')
 print("Model saved as 'O_global.pth'")
 
 # 重新加载模型，用于测试
-O_global_loaded = nn.Parameter(torch.randn(n, m))  # 使用相同的初始化
-O_global_loaded.load_state_dict(torch.load('O_global.pth'))
-print("Final O after training:", O_global)
+O_global_loaded = torch.load('O_global.pth')
 
 def test_model(O, test_images):
     test_loss = 0
