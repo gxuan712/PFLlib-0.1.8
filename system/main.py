@@ -200,7 +200,7 @@ def run(args):
         print(args.model)
 
         # select algorithm
-        if args.algorithm == "FedAvg":
+        if args.algorithm == "FedAvg.py":
             args.head = copy.deepcopy(args.model.fc)
             args.model.fc = nn.Identity()
             args.model = BaseHeadSplit(args.model, args.head)
@@ -305,7 +305,7 @@ def run(args):
             args.model = BaseHeadSplit(args.model, args.head)
             server = FedPAC(args, i)
 
-        elif args.algorithm == "LG-FedAvg":
+        elif args.algorithm == "LG-FedAvg.py":
             args.head = copy.deepcopy(args.model.fc)
             args.model.fc = nn.Identity()
             args.model = BaseHeadSplit(args.model, args.head)
@@ -400,7 +400,7 @@ if __name__ == "__main__":
     parser.add_argument('-gr', "--global_rounds", type=int, default=2000)
     parser.add_argument('-ls', "--local_epochs", type=int, default=1, 
                         help="Multiple update steps in one local epoch.")
-    parser.add_argument('-algo', "--algorithm", type=str, default="FedAvg")
+    parser.add_argument('-algo', "--algorithm", type=str, default="FedAvg.py")
     parser.add_argument('-jr', "--join_ratio", type=float, default=1.0,
                         help="Ratio of clients per round")
     parser.add_argument('-rjr', "--random_join_ratio", type=bool, default=False,
