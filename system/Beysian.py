@@ -5,6 +5,7 @@ import random
 import torch
 import torch.nn as nn
 import torch.optim as optim
+import matplotlib.pyplot as plt
 
 random.seed(1)
 np.random.seed(1)
@@ -141,9 +142,6 @@ def server_side(O, num_clients=20, dir_path="MNIST_clients/", num_selected_clien
     avg_loss = total_loss / num_selected_clients
     return O_global, avg_loss
 
-# Client-side training
-# Adjust learning rate
-
 # KL divergence coefficient
 kl_coefficient = 0.001  # You may adjust this value
 
@@ -218,6 +216,10 @@ if __name__ == "__main__":
     val_labels = torch.tensor(val_labels, dtype=torch.long)
     val_images = val_images.view(-1, 28 * 28)
 
+    # Lists to store loss and accuracy
+    loss_history = []
+    accuracy_history = []
+
     # Federated learning rounds
     num_rounds = 500
     for round in range(num_rounds):
@@ -229,9 +231,37 @@ if __name__ == "__main__":
         accuracy = test_model(O_global, val_images, val_labels)
         print(f"Validation Accuracy after Round {round + 1}: {accuracy:.2f}%")
 
+        # Save loss and accuracy
+        loss_history.append(avg_loss)
+        accuracy_history.append(accuracy)
+
+    # Save the model
     torch.save(O_global, 'O_global.pth')
     print("Model saved as 'O_global.pth'")
 
+    # Plotting the loss and accuracy
+    plt.figure(figsize=(12, 5))
+
+    # Plot Loss
+    plt.subplot(1, 2, 1)
+    plt.plot(range(1, num_rounds + 1), loss_history, 'r', label='Loss')
+    plt.title('Loss over Rounds')
+    plt.xlabel('Rounds')
+    plt.ylabel('Loss')
+    plt.legend()
+
+    # Plot Accuracy
+    plt.subplot(1, 2, 2)
+    plt.plot(range(1, num_rounds + 1), accuracy_history, 'b', label='Accuracy')
+    plt.title('Accuracy over Rounds')
+    plt.xlabel('Rounds')
+    plt.ylabel('Accuracy (%)')
+    plt.legend()
+
+    plt.tight_layout()
+    plt.show()
+
+    # Reload the model and check final accuracy
     O_global_loaded = torch.load('O_global.pth')
     accuracy = test_model(O_global_loaded, val_images, val_labels)
     print(f"Test Accuracy after training: {accuracy:.2f}%")
