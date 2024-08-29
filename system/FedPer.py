@@ -7,10 +7,15 @@ import torch.optim as optim
 from torch.utils.data import TensorDataset, DataLoader
 import matplotlib.pyplot as plt
 import random
+import torchmetrics
+from torchmetrics.classification import CalibrationError
+
+# Set the number of threads for CPU optimization
+torch.set_num_threads(4)
 
 
-# 读取idx文件的函数
 def read_idx(file_path):
+    # Function to read idx files
     with gzip.open(file_path, 'rb') as f:
         magic_number = struct.unpack(">I", f.read(4))[0]
         if magic_number == 2051:  # magic number for images
@@ -26,161 +31,180 @@ def read_idx(file_path):
     return data
 
 
-# 读取MNIST数据
-train_images = read_idx('C:/Users/97481/Desktop/PFLlib-0.1.8/dataset/MNIST/train/train-images-idx3-ubyte.gz')
-train_labels = read_idx('C:/Users/97481/Desktop/PFLlib-0.1.8/dataset/MNIST/train/train-labels-idx1-ubyte.gz')
-test_images = read_idx('C:/Users/97481/Desktop/PFLlib-0.1.8/dataset/MNIST/test/t10k-images-idx3-ubyte.gz')
-test_labels = read_idx('C:/Users/97481/Desktop/PFLlib-0.1.8/dataset/MNIST/test/t10k-labels-idx1-ubyte.gz')
-
-# 转换为PyTorch张量
-train_images = torch.tensor(train_images, dtype=torch.float32).unsqueeze(1)  # Add channel dimension
-train_labels = torch.tensor(train_labels, dtype=torch.long)
-test_images = torch.tensor(test_images, dtype=torch.float32).unsqueeze(1)  # Add channel dimension
-test_labels = torch.tensor(test_labels, dtype=torch.long)
-
-train_dataset = TensorDataset(train_images, train_labels)
-test_dataset = TensorDataset(test_images, test_labels)
-
-train_loader = DataLoader(train_dataset, batch_size=64, shuffle=True)
-test_loader = DataLoader(test_dataset, batch_size=1000, shuffle=False)
-
-
-# 定义FedPer模型
-class FedPerNet(nn.Module):
-    def __init__(self):
-        super(FedPerNet, self).__init__()
-        # 共享层
-        self.conv1 = nn.Conv2d(1, 10, kernel_size=5)
-        self.conv2 = nn.Conv2d(10, 20, kernel_size=5)
-        self.fc1 = nn.Linear(320, 50)
-        # 个性化层
-        self.fc2 = nn.Linear(50, 10)
-
-    def forward(self, x):
-        x = torch.relu(torch.max_pool2d(self.conv1(x), 2))
-        x = torch.relu(torch.max_pool2d(self.conv2(x), 2))
-        x = x.view(-1, 320)
-        x = torch.relu(self.fc1(x))
-        x = self.fc2(x)
-        return torch.log_softmax(x, dim=1)
-
-    def shared_parameters(self):
-        return [param for name, param in self.named_parameters() if 'fc2' not in name]
-
-    def personalization_parameters(self):
-        return [param for name, param in self.named_parameters() if 'fc2' in name]
-
-
-# 定义训练和测试函数
-def train_local_model_fedper(client_model, global_model, device, train_loader, optimizer, epoch):
-    client_model.train()
-    global_model_weights = global_model.state_dict()
-
+def train_local_model(model, device, train_loader, optimizer, epoch):
+    # Training function
+    model.train()
     for batch_idx, (data, target) in enumerate(train_loader):
         data, target = data.to(device), target.to(device)
         optimizer.zero_grad()
-        output = client_model(data)
+        output = model(data)
         loss = nn.functional.nll_loss(output, target)
         loss.backward()
         optimizer.step()
 
 
-def test_fedper(model, device, test_loader):
+def test_with_torchmetrics(model, device, test_loader, temperature_model, ece_metric):
+    # Testing function with torchmetrics
     model.eval()
-    test_loss = 0
+    temperature_model.eval()
     correct = 0
+    all_probs = []
+    all_preds = []
+    all_targets = []
+
     with torch.no_grad():
         for data, target in test_loader:
             data, target = data.to(device), target.to(device)
             output = model(data)
-            test_loss += nn.functional.nll_loss(output, target, reduction='sum').item()
-            pred = output.argmax(dim=1, keepdim=True)
+            scaled_output = temperature_model(output)
+            prob = torch.exp(scaled_output)
+            pred = prob.argmax(dim=1, keepdim=True)
             correct += pred.eq(target.view_as(pred)).sum().item()
 
-    test_loss /= len(test_loader.dataset)
+            all_probs.append(prob)
+            all_preds.append(pred)
+            all_targets.append(target)
+
+    all_probs = torch.cat(all_probs)
+    all_preds = torch.cat(all_preds)
+    all_targets = torch.cat(all_targets)
+
     accuracy = 100. * correct / len(test_loader.dataset)
-    return test_loss, accuracy
+
+    # Calculate ECE using torchmetrics
+    ece = ece_metric(all_probs, all_targets)
+    return accuracy, ece.item()
 
 
-# FedAvg 聚合算法
-def federated_averaging(global_model, client_models):
+class FedPerNet(nn.Module):
+    def __init__(self):
+        # Model definition
+        super(FedPerNet, self).__init__()
+        self.shared_conv1 = nn.Conv2d(1, 10, kernel_size=5)
+        self.shared_conv2 = nn.Conv2d(10, 20, kernel_size=5)
+        self.personalized_fc1 = nn.Linear(320, 50)
+        self.personalized_fc2 = nn.Linear(50, 10)
+
+    def forward(self, x):
+        x = torch.relu(torch.max_pool2d(self.shared_conv1(x), 2))
+        x = torch.relu(torch.max_pool2d(self.shared_conv2(x), 2))
+        x = x.view(-1, 320)
+        x = torch.relu(self.personalized_fc1(x))
+        x = self.personalized_fc2(x)
+        return torch.log_softmax(x, dim=1)
+
+
+class TemperatureScaling(nn.Module):
+    def __init__(self, temperature=1.0):
+        super(TemperatureScaling, self).__init__()
+        self.temperature = nn.Parameter(torch.ones(1) * temperature)
+
+    def forward(self, logits):
+        return logits / self.temperature
+
+
+def federated_personalization_averaging(global_model, client_models):
     global_dict = global_model.state_dict()
-    for k in global_dict.keys():
-        if 'fc2' not in k:  # 只聚合共享层
-            global_dict[k] = torch.stack([client_models[i].state_dict()[k].float() for i in range(len(client_models))],
-                                         0).mean(0)
+
+    shared_layers = ['shared_conv1.weight', 'shared_conv1.bias', 'shared_conv2.weight', 'shared_conv2.bias']
+
+    for k in shared_layers:
+        global_dict[k] = torch.stack([client_models[i].state_dict()[k].float() for i in range(len(client_models))],
+                                     0).mean(0)
+
     global_model.load_state_dict(global_dict, strict=False)
     return global_model
 
 
+def client_update(client_model, optimizer, train_loader, device, epochs=1):
+    for epoch in range(epochs):
+        train_local_model(client_model, device, train_loader, optimizer, epoch)
+
+
 def server_aggregate(global_model, client_models):
-    return federated_averaging(global_model, client_models)
+    return federated_personalization_averaging(global_model, client_models)
 
 
-# 设备配置
-device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+if __name__ == "__main__":
+    # Main execution code
 
-# 模拟客户端
-num_clients = 20  # 总客户端数量
-client_models = [FedPerNet().to(device) for _ in range(num_clients)]
-global_model = FedPerNet().to(device)
+    device = torch.device("cpu")
 
-# 设置优化器
-optimizers = [optim.SGD(model.parameters(), lr=0.01, momentum=0.9) for model in client_models]
+    train_images = read_idx('C:/Users/97481/Desktop/PFLlib-0.1.8/dataset/MNIST/train/train-images-idx3-ubyte.gz')
+    train_labels = read_idx('C:/Users/97481/Desktop/PFLlib-0.1.8/dataset/MNIST/train/train-labels-idx1-ubyte.gz')
+    test_images = read_idx('C:/Users/97481/Desktop/PFLlib-0.1.8/dataset/MNIST/test/t10k-images-idx3-ubyte.gz')
+    test_labels = read_idx('C:/Users/97481/Desktop/PFLlib-0.1.8/dataset/MNIST/test/t10k-labels-idx1-ubyte.gz')
 
-# 收集loss和accuracy的列表
-global_losses = []
-global_accuracies = []
+    train_images = torch.tensor(train_images, dtype=torch.float16).unsqueeze(1)
+    train_labels = torch.tensor(train_labels, dtype=torch.long)
+    test_images = torch.tensor(test_images, dtype=torch.float16).unsqueeze(1)
+    test_labels = torch.tensor(test_labels, dtype=torch.long)
 
-# 联邦学习训练过程
-global_epochs = 10
-local_epochs = 2
-clients_per_round = 10  # 每轮选择的客户端数量
+    train_dataset = TensorDataset(train_images, train_labels)
+    test_dataset = TensorDataset(test_images, test_labels)
 
-for epoch in range(global_epochs):
-    print(f"Global Epoch {epoch + 1}/{global_epochs}")
+    train_loader = DataLoader(train_dataset, batch_size=64, shuffle=True, num_workers=4)
+    test_loader = DataLoader(test_dataset, batch_size=1000, shuffle=False, num_workers=4)
 
-    # 随机选择10个客户端
-    selected_clients = random.sample(range(num_clients), clients_per_round)
+    num_clients = 20
+    client_models = [FedPerNet().to(device).half() for _ in range(num_clients)]
+    global_model = FedPerNet().to(device).half()
 
-    # 在每个选中的客户端上进行本地训练
-    for i in selected_clients:
-        train_local_model_fedper(client_models[i], global_model, device, train_loader, optimizers[i], local_epochs)
+    optimizers = [optim.SGD(model.parameters(), lr=0.01, momentum=0.9) for model in client_models]
 
-    # 在服务器端聚合模型
-    selected_client_models = [client_models[i] for i in selected_clients]
-    global_model = server_aggregate(global_model, selected_client_models)
+    temperature_model = TemperatureScaling().to(device)
+    optimizer_temp = optim.LBFGS([temperature_model.temperature], lr=0.01, max_iter=50)
 
-    # 将全局模型的共享层更新到每个客户端（个性化层保持不变）
-    for model in client_models:
-        model.load_state_dict(global_model.state_dict(), strict=False)
+    ece_metric = CalibrationError(n_bins=15, norm='l1', task='multiclass', num_classes=10).to(device)
 
-    # 使用全局模型进行验证
-    test_loss, accuracy = test_fedper(global_model, device, test_loader)
-    global_losses.append(test_loss)
-    global_accuracies.append(accuracy)
-    print(f"Validation set: Average loss: {test_loss:.4f}, Accuracy: {accuracy:.2f}%")
+    global_accuracies = []
+    global_eces = []
 
-# 绘制loss和accuracy的图表
-epochs = range(1, global_epochs + 1)
+    global_epochs = 500
+    local_epochs = 5
+    clients_per_round = 10
 
-plt.figure(figsize=(12, 5))
+    for epoch in range(global_epochs):
+        print(f"Global Epoch {epoch + 1}/{global_epochs}")
 
-# Loss 图表
-plt.subplot(1, 2, 1)
-plt.plot(epochs, global_losses, 'r', label='Loss')
-plt.title('Global Model Loss')
-plt.xlabel('Epochs')
-plt.ylabel('Loss')
-plt.legend()
+        selected_clients = random.sample(range(num_clients), clients_per_round)
 
-# Accuracy 图表
-plt.subplot(1, 2, 2)
-plt.plot(epochs, global_accuracies, 'b', label='Accuracy')
-plt.title('Global Model Accuracy')
-plt.xlabel('Epochs')
-plt.ylabel('Accuracy (%)')
-plt.legend()
+        for i in selected_clients:
+            client_update(client_models[i], optimizers[i], train_loader, device, local_epochs)
 
-plt.tight_layout()
-plt.show()
+        selected_client_models = [client_models[i] for i in selected_clients]
+        global_model = server_aggregate(global_model, selected_client_models)
+
+        global_shared_dict = {k: v for k, v in global_model.state_dict().items() if
+                              k in ['shared_conv1.weight', 'shared_conv1.bias', 'shared_conv2.weight',
+                                    'shared_conv2.bias']}
+        for model in client_models:
+            model_state = model.state_dict()
+            model_state.update(global_shared_dict)
+            model.load_state_dict(model_state, strict=False)
+
+        accuracy, ece = test_with_torchmetrics(global_model, device, test_loader, temperature_model, ece_metric)
+        global_accuracies.append(accuracy)
+        global_eces.append(ece)
+        print(f"Validation set: Accuracy: {accuracy:.2f}%, ECE: {ece:.4f}")
+
+    epochs = range(1, global_epochs + 1)
+
+    plt.figure(figsize=(12, 5))
+
+    plt.subplot(1, 2, 1)
+    plt.plot(epochs, global_accuracies, 'b', label='Accuracy')
+    plt.title('Global Model Accuracy')
+    plt.xlabel('Epochs')
+    plt.ylabel('Accuracy (%)')
+    plt.legend()
+
+    plt.subplot(1, 2, 2)
+    plt.plot(epochs, global_eces, 'r', label='ECE')
+    plt.title('Global Model ECE')
+    plt.xlabel('Epochs')
+    plt.ylabel('ECE')
+    plt.legend()
+
+    plt.tight_layout()
+    plt.show()

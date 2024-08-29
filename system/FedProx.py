@@ -56,17 +56,17 @@ class Net(nn.Module):
 
     def forward(self, x):
         x = torch.relu(torch.max_pool2d(self.conv1(x), 2))
-        x = torch.relu(torch.max_pool2d(self.conv2(x), 2))
+        x = torch.relu(torch.max_pool2d(this.conv2(x), 2))
         x = x.view(-1, 320)
         x = torch.relu(self.fc1(x))
         x = self.fc2(x)
         return torch.log_softmax(x, dim=1)
 
 
-# 定义FedProx的客户端更新函数
-def train_local_model_fedprox(client_model, global_model, device, train_loader, optimizer, mu, epoch):
+# FedProx 本地更新函数
+def train_local_model_prox(client_model, global_model, device, train_loader, optimizer, mu, epoch):
     client_model.train()
-    global_model_weights = global_model.state_dict()
+    global_params = list(global_model.parameters())
 
     for batch_idx, (data, target) in enumerate(train_loader):
         data, target = data.to(device), target.to(device)
@@ -74,34 +74,17 @@ def train_local_model_fedprox(client_model, global_model, device, train_loader, 
         output = client_model(data)
         loss = nn.functional.nll_loss(output, target)
 
-        # 添加FedProx正则化项
+        # Proximal term
         proximal_term = 0.0
-        for w, w_t in zip(client_model.parameters(), global_model_weights.values()):
-            proximal_term += ((w - w_t) ** 2).sum()
+        for param, global_param in zip(client_model.parameters(), global_params):
+            proximal_term += torch.sum((param - global_param) ** 2)
 
         loss += (mu / 2) * proximal_term
         loss.backward()
         optimizer.step()
 
 
-def test(model, device, test_loader):
-    model.eval()
-    test_loss = 0
-    correct = 0
-    with torch.no_grad():
-        for data, target in test_loader:
-            data, target = data.to(device), target.to(device)
-            output = model(data)
-            test_loss += nn.functional.nll_loss(output, target, reduction='sum').item()
-            pred = output.argmax(dim=1, keepdim=True)
-            correct += pred.eq(target.view_as(pred)).sum().item()
-
-    test_loss /= len(test_loader.dataset)
-    accuracy = 100. * correct / len(test_loader.dataset)
-    return test_loss, accuracy
-
-
-# FedAvg 聚合算法
+# FedAvg 聚合函数
 def federated_averaging(global_model, client_models):
     global_dict = global_model.state_dict()
     for k in global_dict.keys():
@@ -111,8 +94,52 @@ def federated_averaging(global_model, client_models):
     return global_model
 
 
+# 客户端更新函数
+def client_update(client_model, global_model, optimizer, train_loader, device, mu, epochs=1):
+    for epoch in range(epochs):
+        train_local_model_prox(client_model, global_model, device, train_loader, optimizer, mu, epoch)
+
+
 def server_aggregate(global_model, client_models):
     return federated_averaging(global_model, client_models)
+
+
+# ECE计算函数
+def calculate_ece(confidences, accuracies, n_bins=15):
+    bin_boundaries = np.linspace(0, 1, n_bins + 1)
+    ece = 0.0
+    for i in range(n_bins):
+        in_bin = (confidences > bin_boundaries[i]) & (confidences <= bin_boundaries[i + 1])
+        prop_in_bin = in_bin.mean()
+        if prop_in_bin > 0:
+            accuracy_in_bin = accuracies[in_bin].mean()
+            avg_confidence_in_bin = confidences[in_bin].mean()
+            ece += np.abs(avg_confidence_in_bin - accuracy_in_bin) * prop_in_bin
+
+    return ece
+
+
+def test(model, device, test_loader):
+    model.eval()
+    correct = 0
+    confidences = []
+    accuracies = []
+    with torch.no_grad():
+        for data, target in test_loader:
+            data, target = data.to(device), target.to(device)
+            output = model(data)
+            prob = torch.exp(output)  # Convert log probabilities to probabilities
+            pred = prob.argmax(dim=1, keepdim=True)
+            correct += pred.eq(target.view_as(pred)).sum().item()
+
+            # Calculate confidence and accuracy for ECE
+            confidence = prob.max(dim=1)[0]
+            accuracies.extend(pred.eq(target.view_as(pred)).squeeze().cpu().numpy())
+            confidences.extend(confidence.cpu().numpy())
+
+    accuracy = 100. * correct / len(test_loader.dataset)
+    ece = calculate_ece(np.array(confidences), np.array(accuracies))
+    return accuracy, ece
 
 
 # 设备配置
@@ -126,17 +153,15 @@ global_model = Net().to(device)
 # 设置优化器
 optimizers = [optim.SGD(model.parameters(), lr=0.01, momentum=0.9) for model in client_models]
 
-# 收集loss和accuracy的列表
-global_losses = []
+# 收集accuracy和ECE的列表
 global_accuracies = []
-
-# FedProx超参数
-mu = 0.01  # Proximal term coefficient
+global_eces = []
 
 # 联邦学习训练过程
-global_epochs = 10
-local_epochs = 2
+global_epochs = 500
+local_epochs = 5
 clients_per_round = 10  # 每轮选择的客户端数量
+mu = 0.1  # FedProx 正则化参数
 
 for epoch in range(global_epochs):
     print(f"Global Epoch {epoch + 1}/{global_epochs}")
@@ -146,7 +171,7 @@ for epoch in range(global_epochs):
 
     # 在每个选中的客户端上进行本地训练
     for i in selected_clients:
-        train_local_model_fedprox(client_models[i], global_model, device, train_loader, optimizers[i], mu, local_epochs)
+        client_update(client_models[i], global_model, optimizers[i], train_loader, device, mu, local_epochs)
 
     # 在服务器端聚合模型
     selected_client_models = [client_models[i] for i in selected_clients]
@@ -157,30 +182,30 @@ for epoch in range(global_epochs):
         model.load_state_dict(global_model.state_dict())
 
     # 使用全局模型进行验证
-    test_loss, accuracy = test(global_model, device, test_loader)
-    global_losses.append(test_loss)
+    accuracy, ece = test(global_model, device, test_loader)
     global_accuracies.append(accuracy)
-    print(f"Validation set: Average loss: {test_loss:.4f}, Accuracy: {accuracy:.2f}%")
+    global_eces.append(ece)
+    print(f"Validation set: Accuracy: {accuracy:.2f}%, ECE: {ece:.4f}")
 
-# 绘制loss和accuracy的图表
+# 绘制accuracy和ECE的图表
 epochs = range(1, global_epochs + 1)
 
 plt.figure(figsize=(12, 5))
 
-# Loss 图表
-plt.subplot(1, 2, 1)
-plt.plot(epochs, global_losses, 'r', label='Loss')
-plt.title('Global Model Loss')
-plt.xlabel('Epochs')
-plt.ylabel('Loss')
-plt.legend()
-
 # Accuracy 图表
-plt.subplot(1, 2, 2)
+plt.subplot(1, 2, 1)
 plt.plot(epochs, global_accuracies, 'b', label='Accuracy')
 plt.title('Global Model Accuracy')
 plt.xlabel('Epochs')
 plt.ylabel('Accuracy (%)')
+plt.legend()
+
+# ECE 图表
+plt.subplot(1, 2, 2)
+plt.plot(epochs, global_eces, 'r', label='ECE')
+plt.title('Global Model ECE')
+plt.xlabel('Epochs')
+plt.ylabel('ECE')
 plt.legend()
 
 plt.tight_layout()

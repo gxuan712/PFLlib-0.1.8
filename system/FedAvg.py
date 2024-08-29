@@ -127,8 +127,8 @@ global_losses = []
 global_accuracies = []
 
 # 联邦学习训练过程
-global_epochs = 10
-local_epochs = 2
+global_epochs = 500
+local_epochs = 5
 clients_per_round = 10  # 每轮选择的客户端数量
 
 for epoch in range(global_epochs):
